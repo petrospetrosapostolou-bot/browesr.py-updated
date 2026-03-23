@@ -1,0 +1,293 @@
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+import threading, os, tempfile, subprocess, time, requests, traceback, zipfile, platform, sys
+from tkhtmlview import HTMLLabel  # <--- Embedded browser
+import webbrowser
+
+# ---------------- ERROR LOG ----------------
+ERROR_FILE = os.path.join(os.environ['USERPROFILE'], "Desktop", "ERRORS.TXT")
+
+def log_exception(exc_type, exc_value, exc_traceback):
+    with open(ERROR_FILE, "a") as f:
+        f.write("".join(traceback.format_exception(exc_type, exc_value, exc_traceback)))
+        f.write("\n\n")
+    messagebox.showerror("Error", f"Logged to {ERROR_FILE}")
+
+sys.excepthook = log_exception
+
+def safe_execute(func):
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception:
+            log_exception(*sys.exc_info())
+    return wrapper
+
+USERNAME = os.getlogin()
+SYSDIST = os.path.join(os.environ['USERPROFILE'], "Desktop", "SYSDIST")
+os.makedirs(SYSDIST, exist_ok=True)
+DRIVER_PATH = os.path.join(SYSDIST, "DRIVERS")
+os.makedirs(DRIVER_PATH, exist_ok=True)
+
+root = tk.Tk()
+root.title("DEV TOOL")
+root.geometry("1200x900")
+tabs = ttk.Notebook(root)
+
+# ---------------- TAB 1: Downloader ----------------
+tab1 = ttk.Frame(tabs)
+tabs.add(tab1, text="Downloader")
+progress = ttk.Progressbar(tab1, length=500)
+progress.pack(pady=20)
+
+@safe_execute
+def download_file():
+    url = "https://raw.githubusercontent.com/python/cpython/main/README.rst"
+    local_path = os.path.join(os.environ['USERPROFILE'], "Downloads", "file.py")
+    r = requests.get(url, stream=True, verify=False)
+    total = int(r.headers.get("content-length", 0))
+    with open(local_path, "wb") as f:
+        if total == 0:
+            for chunk in r.iter_content(1024):
+                f.write(chunk)
+        else:
+            for i, chunk in enumerate(r.iter_content(1024)):
+                f.write(chunk)
+                progress["value"] = (i*1024/total)*100
+                root.update_idletasks()
+    messagebox.showinfo("Downloaded", f"Saved to {local_path}")
+
+tk.Button(tab1, text="Download", command=lambda: threading.Thread(target=download_file, daemon=True).start()).pack(pady=10)
+
+# ---------------- TAB 2: Terminal ----------------
+tab2 = ttk.Frame(tabs)
+tabs.add(tab2, text="Terminal")
+out = tk.Text(tab2, height=15)
+out.pack()
+code = tk.Text(tab2, height=10)
+code.pack()
+
+@safe_execute
+def run_c_terminal():
+    c = code.get("1.0", tk.END)
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".c")
+    tmp.write(c.encode()); tmp.close()
+    exe = tmp.name.replace(".c", ".exe")
+    subprocess.getoutput(f"gcc {tmp.name} -o {exe}")
+    result = subprocess.getoutput(exe)
+    out.insert(tk.END, result + "\n")
+
+tk.Button(tab2, text="Run C", command=lambda: threading.Thread(target=run_c_terminal).start()).pack()
+
+# ---------------- TAB 3: Embedded Browser ----------------
+tab3 = ttk.Frame(tabs)
+tabs.add(tab3, text="Browser")
+
+url_var = tk.StringVar(value="https://www.google.com")
+entry_url = tk.Entry(tab3, textvariable=url_var, width=80)
+entry_url.pack(pady=5)
+
+frame_browser = tk.Frame(tab3)
+frame_browser.pack(expand=1, fill="both")
+
+browser_label = HTMLLabel(frame_browser, html="<h2>Loading...</h2>")
+browser_label.pack(expand=1, fill="both")
+
+@safe_execute
+def load_browser():
+    html = f'<iframe src="{url_var.get()}" width="100%" height="100%"></iframe>'
+    browser_label.set_html(html)
+
+tk.Button(tab3, text="Go", command=load_browser).pack(pady=5)
+
+# ---------------- TAB 4: Compiler ----------------
+tab4 = ttk.Frame(tabs)
+tabs.add(tab4, text="Compiler")
+editor = tk.Text(tab4, height=20); editor.pack()
+
+@safe_execute
+def compile_c():
+    c = editor.get("1.0", tk.END)
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".c"); tmp.write(c.encode()); tmp.close()
+    exe_main = os.path.join(SYSDIST, f"prog_{int(time.time())}.exe")
+    tmp2 = tempfile.NamedTemporaryFile(delete=False, suffix=".c")
+    tmp2.write(b'#include <stdio.h>\nint main(){system("cmd");return 0;}'); tmp2.close()
+    exe_terminal = os.path.join(SYSDIST, "terminal.exe")
+    subprocess.getoutput(f"gcc {tmp.name} -o \"{exe_main}\"")
+    subprocess.getoutput(f"gcc {tmp2.name} -o \"{exe_terminal}\"")
+    if os.path.exists(exe_main):
+        messagebox.showinfo("Compiled", f"{exe_main}\nterminal.exe ready")
+    else:
+        messagebox.showerror("Error", "Compilation failed")
+
+tk.Button(tab4, text="Compile", command=lambda: threading.Thread(target=compile_c).start()).pack()
+
+# ---------------- TAB 5: GitHub Downloader ----------------
+tab5 = ttk.Frame(tabs)
+tabs.add(tab5, text="GitHub Downloader")
+entry = tk.Entry(tab5, width=80); entry.pack()
+listbox = tk.Listbox(tab5); listbox.pack()
+
+@safe_execute
+def load_refs():
+    url = entry.get().replace("https://github.com/", "")
+    user, repo = url.split("/")[:2]
+    listbox.delete(0, tk.END)
+    b = requests.get(f"https://api.github.com/repos/{user}/{repo}/branches", verify=False).json()
+    t = requests.get(f"https://api.github.com/repos/{user}/{repo}/tags", verify=False).json()
+    for i in b: listbox.insert(tk.END, "branch:" + i["name"])
+    for i in t: listbox.insert(tk.END, "tag:" + i["name"])
+
+@safe_execute
+def download_sel():
+    sel = listbox.get(tk.ACTIVE)
+    url = entry.get().replace("https://github.com/", "")
+    user, repo = url.split("/")[:2]
+    typ, name = sel.split(":")
+    zip_url = f"https://github.com/{user}/{repo}/archive/refs/{'heads' if typ=='branch' else 'tags'}/{name}.zip"
+    path = os.path.join(os.environ['USERPROFILE'], "Downloads", f"{repo}-{name}.zip")
+    r = requests.get(zip_url, stream=True, verify=False)
+    with open(path, "wb") as f:
+        for d in r.iter_content(1024): f.write(d)
+    with zipfile.ZipFile(path, 'a') as z: z.writestr("AUTOMATEDACCOUNT.txt", "auto")
+    messagebox.showinfo("Downloaded", f"{path}")
+
+tk.Button(tab5, text="Load", command=lambda: threading.Thread(target=load_refs).start()).pack()
+tk.Button(tab5, text="Download", command=lambda: threading.Thread(target=download_sel).start()).pack()
+
+# ---------------- TAB 6: Create Repo ----------------
+tab6 = ttk.Frame(tabs)
+tabs.add(tab6, text="Create Repo")
+token = tk.Entry(tab6, width=80); token.pack()
+name = tk.Entry(tab6, width=80); name.pack()
+
+@safe_execute
+def create_repo():
+    headers = {"Authorization": f"token {token.get()}"}
+    data = {"name": name.get()}
+    r = requests.post("https://api.github.com/user/repos", json=data, headers=headers, verify=False)
+    messagebox.showinfo("Result", str(r.json()))
+
+tk.Button(tab6, text="Create", command=lambda: threading.Thread(target=create_repo).start()).pack()
+
+# ---------------- TAB 7: Clone Repo ----------------
+tab7 = ttk.Frame(tabs)
+tabs.add(tab7, text="Clone")
+clone_entry = tk.Entry(tab7, width=80); clone_entry.pack()
+
+@safe_execute
+def clone():
+    subprocess.getoutput(f'cd {os.path.join(os.environ["USERPROFILE"], "Downloads")} && git clone {clone_entry.get()}')
+    messagebox.showinfo("Done", "Cloned")
+
+tk.Button(tab7, text="Clone", command=lambda: threading.Thread(target=clone).start()).pack()
+
+# ---------------- TAB 8: Emulator ----------------
+tab8 = ttk.Frame(tabs)
+tabs.add(tab8, text="Mini Emulator")
+file_var = tk.StringVar()
+tk.Entry(tab8, textvariable=file_var, width=80).pack()
+tk.Button(tab8, text="Browse", command=lambda: file_var.set(filedialog.askopenfilename())).pack()
+text_em = tk.Text(tab8, height=20); text_em.pack()
+
+@safe_execute
+def emulate():
+    path = file_var.get()
+    if not os.path.exists(path): return
+    text_em.delete("1.0", tk.END)
+    with open(path, "rb") as f:
+        data = f.read(512)
+    for b in data:
+        if 32 <= b < 127: text_em.insert(tk.END, chr(b))
+
+tk.Button(tab8, text="Run", command=lambda: threading.Thread(target=emulate).start()).pack()
+
+# ---------------- TAB 9: WinRe Nested System ----------------
+tab9 = ttk.Frame(tabs)
+tabs.add(tab9, text="WinRe")
+inner_tabs = ttk.Notebook(tab9); inner_tabs.pack(expand=1, fill="both")
+
+# Subtab 1: System Info
+sys_tab = ttk.Frame(inner_tabs); inner_tabs.add(sys_tab, text="System Info")
+info = f"System: {platform.system()}\nNode: {platform.node()}\nRelease: {platform.release()}\nVersion: {platform.version()}\nMachine: {platform.machine()}\nProcessor: {platform.processor()}"
+tk.Label(sys_tab, text=info, justify="left").pack(pady=10)
+
+# Subtab 2: File Explorer
+file_tab = ttk.Frame(inner_tabs); inner_tabs.add(file_tab, text="Explorer")
+file_list = tk.Listbox(file_tab, width=80); file_list.pack()
+current_path = os.path.expanduser("~")
+def load_files(path):
+    file_list.delete(0, tk.END)
+    for f in os.listdir(path): file_list.insert(tk.END, f)
+load_files(current_path)
+def open_selected():
+    sel = file_list.get(file_list.curselection())
+    full = os.path.join(current_path, sel)
+    if os.path.isdir(full): load_files(full)
+    else: os.startfile(full)
+tk.Button(file_tab, text="Open", command=open_selected).pack()
+
+# Subtab 3: Command Runner
+cmd_tab = ttk.Frame(inner_tabs); inner_tabs.add(cmd_tab, text="CMD")
+cmd_entry = tk.Entry(cmd_tab, width=80); cmd_entry.pack()
+cmd_output = tk.Text(cmd_tab, height=15); cmd_output.pack()
+def run_cmd(): cmd_output.insert(tk.END, subprocess.getoutput(cmd_entry.get()) + "\n")
+tk.Button(cmd_tab, text="Run", command=run_cmd).pack()
+
+# Subtab 4: Notes
+notes_tab = ttk.Frame(inner_tabs); inner_tabs.add(notes_tab, text="Notes")
+notes = tk.Text(notes_tab, height=20); notes.pack()
+
+# ---------------- TAB 10: Driver Lab ----------------
+tab10 = ttk.Frame(tabs); tabs.add(tab10, text="Driver Lab")
+driver_tabs = ttk.Notebook(tab10); driver_tabs.pack(expand=1, fill="both")
+
+# Subtab 1: Create Driver
+create_tab = ttk.Frame(driver_tabs); driver_tabs.add(create_tab, text="Create Driver")
+tk.Label(create_tab, text="Driver C Code:").pack(pady=5)
+driver_editor = tk.Text(create_tab, height=20); driver_editor.pack(pady=10)
+status_driver = tk.Label(create_tab, text=""); status_driver.pack()
+
+@safe_execute
+def compile_driver():
+    code = driver_editor.get("1.0", tk.END)
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".c"); tmp.write(code.encode()); tmp.close()
+    driver_name = f"driver_{int(time.time())}.sys"
+    driver_file = os.path.join(DRIVER_PATH, driver_name)
+    result = subprocess.getoutput(f"gcc {tmp.name} -o \"{driver_file}\"")
+    if os.path.exists(driver_file):
+        status_driver.config(text=f"✅ Built: {driver_file}")
+        messagebox.showinfo("Driver", f"Created:\n{driver_file}")
+    else:
+        status_driver.config(text="❌ Failed")
+        messagebox.showerror("Error", result)
+
+tk.Button(create_tab, text="Build Driver", command=lambda: threading.Thread(target=compile_driver).start()).pack(pady=5)
+
+# Subtab 2: Driver Safety Check
+check_tab = ttk.Frame(driver_tabs); driver_tabs.add(check_tab, text="Safety Check")
+file_var_driver = tk.StringVar()
+tk.Entry(check_tab, textvariable=file_var_driver, width=80).pack(pady=5)
+tk.Button(check_tab, text="Browse Driver", command=lambda: file_var_driver.set(filedialog.askopenfilename())).pack()
+result_box = tk.Text(check_tab, height=20); result_box.pack()
+
+@safe_execute
+def check_driver():
+    path = file_var_driver.get()
+    if not os.path.exists(path): messagebox.showerror("Error", "Invalid file"); return
+    result_box.delete("1.0", tk.END)
+    size = os.path.getsize(path); result_box.insert(tk.END, f"Size: {size} bytes\n")
+    with open(path, "rb") as f: data = f.read()
+    suspicious = 0
+    keywords = [b"cmd", b"powershell", b"system", b"exec"]
+    for k in keywords:
+        if k in data:
+            suspicious += 1
+            result_box.insert(tk.END, f"⚠ Found: {k.decode()}\n")
+    result_box.insert(tk.END, "\n✅ SAFE for emulator\n" if suspicious==0 else "\n⚠ Suspicious - test carefully\n")
+
+tk.Button(check_tab, text="Check Driver", command=lambda: threading.Thread(target=check_driver).start()).pack(pady=5)
+
+# ---------------- FINALIZE ----------------
+tabs.pack(expand=1, fill="both")
+root.mainloop()
